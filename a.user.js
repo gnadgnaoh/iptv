@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QMH Monster HLS Player & Downloader
 // @namespace    https://github.com/siritami
-// @version      2.4.0
+// @version      2.4.1
 // @description  Replace the QMH player with a simple HLS player and download its resolved stream
 // @match        https://qmh.monster/*
 // @grant        none
