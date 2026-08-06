@@ -12,11 +12,11 @@
 
 (function () {
   'use strict';
-
+ 
   const MESSAGE_TYPE = 'QMH_RESOLVED_HLS';
   const RESOLVE_PATH = '/api/v1/upload/video-hls/resolve';
   const isTopFrame = window === window.top;
-
+ 
   let currentPlaylistUrl = null;
   let playerCleanup = null;
   let mountTimer = null;
@@ -24,20 +24,23 @@
   let playerObserver = null;
   let playerPortal = null;
   let portalPositionCleanup = null;
-
+ 
   installFetchInterceptor();
-  if (isTopFrame) window.addEventListener('message', handleResolvedPlaylist);
-
+  if (isTopFrame) {
+    window.addEventListener('message', handleResolvedPlaylist);
+    watchNavigation();
+  }
+ 
   // ── @grant none: script chạy trong page context, patch fetch trực tiếp ───
   function installFetchInterceptor() {
     if (window.__qmhHlsFetchInstalled) return;
     window.__qmhHlsFetchInstalled = true;
-
+ 
     const originalFetch = window.fetch.bind(window);
     window.fetch = async function (...args) {
       const response = await originalFetch(...args);
       const requestUrl = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
-
+ 
       if (requestUrl.includes(RESOLVE_PATH) && response.ok) {
         response.clone().json().then((payload) => {
           const playlistUrl = payload?.data?.url;
@@ -46,18 +49,55 @@
           }
         }).catch((e) => console.warn('[QMH HLS] Could not read resolve response:', e));
       }
-
+ 
       return response;
     };
   }
-
+ 
   function handleResolvedPlaylist(event) {
     if (!isTopFrame) return;
     if (event.data?.type !== MESSAGE_TYPE || typeof event.data.playlistUrl !== 'string') return;
     currentPlaylistUrl = event.data.playlistUrl;
     scheduleMount(750);
   }
-
+ 
+  // ── Reset player khi navigate sang trang khác ─────────────────────────────
+  function watchNavigation() {
+    let lastUrl = location.href;
+ 
+    function onUrlChange() {
+      const currentUrl = location.href;
+      if (currentUrl === lastUrl) return;
+      lastUrl = currentUrl;
+ 
+      // Destroy player và reset state khi rời khỏi trang video
+      clearTimeout(mountTimer);
+      currentPlaylistUrl = null;
+      playerCleanup?.();
+      playerCleanup = null;
+      portalPositionCleanup?.();
+      portalPositionCleanup = null;
+      playerObserver?.disconnect();
+      playerObserver = null;
+      playerPortal?.remove();
+      playerPortal = null;
+      mountGeneration++;
+    }
+ 
+    // SPA navigation dùng history API
+    const originalPushState = history.pushState.bind(history);
+    const originalReplaceState = history.replaceState.bind(history);
+    history.pushState = function (...args) {
+      originalPushState(...args);
+      onUrlChange();
+    };
+    history.replaceState = function (...args) {
+      originalReplaceState(...args);
+      onUrlChange();
+    };
+    window.addEventListener('popstate', onUrlChange);
+  }
+ 
   function scheduleMount(delayMilliseconds) {
     clearTimeout(mountTimer);
     mountTimer = setTimeout(async () => {
@@ -68,20 +108,20 @@
       });
     }, delayMilliseconds);
   }
-
+ 
   async function waitForPageReady() {
     if (document.readyState !== 'complete') {
       await new Promise((resolve) => window.addEventListener('load', resolve, { once: true }));
     }
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   }
-
+ 
   async function mountPlayer(playlistUrl) {
     const oldFrame = document.getElementById('secure-m3u8-embed-frame');
     const playerSurface = findPlayerSurface(oldFrame);
     if (!playerSurface) return;
     const generation = ++mountGeneration;
-
+ 
     const existingPlayer = document.getElementById('qmh-simple-hls-player');
     if (existingPlayer?.dataset.playlistUrl === playlistUrl) {
       portalPositionCleanup?.();
@@ -89,14 +129,14 @@
       watchPlayer(playerSurface);
       return;
     }
-
+ 
     playerCleanup?.();
     playerCleanup = null;
     portalPositionCleanup?.();
     portalPositionCleanup = null;
     playerPortal?.remove();
     playerPortal = null;
-
+ 
     const wrapper = document.createElement('div');
     wrapper.id = 'qmh-simple-hls-player';
     wrapper.dataset.playlistUrl = playlistUrl;
@@ -110,13 +150,13 @@
       'pointer-events:auto !important',
       'overflow:hidden',
     ].join(';');
-
+ 
     const video = document.createElement('video');
     video.controls = true;
     video.autoplay = true;
     video.playsInline = true;
     video.style.cssText = 'width:100%;min-height:0;flex:1;background:#000;object-fit:contain';
-
+ 
     const toolbar = document.createElement('div');
     toolbar.style.cssText = [
       'display:flex',
@@ -127,7 +167,7 @@
       'color:#fff',
       'font:13px sans-serif',
     ].join(';');
-
+ 
     const downloadButton = document.createElement('button');
     downloadButton.type = 'button';
     downloadButton.textContent = 'Download video';
@@ -139,11 +179,11 @@
       'cursor:pointer',
       'font-weight:600',
     ].join(';');
-
+ 
     const status = document.createElement('span');
     status.textContent = 'Loading HLS...';
     status.style.cssText = 'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
-
+ 
     downloadButton.addEventListener('click', () => downloadVideo(playlistUrl, downloadButton, status));
     toolbar.append(downloadButton, status);
     wrapper.append(video, toolbar);
@@ -151,13 +191,13 @@
     playerPortal = wrapper;
     portalPositionCleanup = positionPortal(wrapper, playerSurface);
     watchPlayer(playerSurface);
-
+ 
     const cleanup = await startHls(video, playlistUrl, status);
     if (generation !== mountGeneration || !wrapper.isConnected) {
       cleanup();
       return;
     }
-
+ 
     playerCleanup = () => {
       cleanup();
       video.pause();
@@ -165,13 +205,13 @@
       video.load();
     };
   }
-
+ 
   function findPlayerSurface(frame) {
     if (frame?.parentElement) return frame.parentElement;
     const playerRegion = document.querySelector('section[aria-label="Video player"]');
     return playerRegion?.querySelector('[class*="aspect-video"]') || playerRegion?.firstElementChild;
   }
-
+ 
   function positionPortal(portal, surface) {
     let animationFrame = 0;
     const update = () => {
@@ -192,7 +232,7 @@
     window.addEventListener('resize', requestUpdate);
     window.addEventListener('scroll', requestUpdate, true);
     update();
-
+ 
     return () => {
       if (animationFrame) cancelAnimationFrame(animationFrame);
       resizeObserver.disconnect();
@@ -200,7 +240,7 @@
       window.removeEventListener('scroll', requestUpdate, true);
     };
   }
-
+ 
   function watchPlayer(surface) {
     playerObserver?.disconnect();
     playerObserver = new MutationObserver(() => {
@@ -219,13 +259,13 @@
     });
     playerObserver.observe(document.body, { childList: true, subtree: true });
   }
-
+ 
   async function startHls(video, playlistUrl, status) {
     const playbackUrl = await createPlaybackUrl(playlistUrl);
     const revokePlaybackUrl = playbackUrl.startsWith('blob:')
       ? () => URL.revokeObjectURL(playbackUrl)
       : () => {};
-
+ 
     if (typeof Hls !== 'undefined' && Hls.isSupported()) {
       const hls = new Hls({ enableWorker: false });
       hls.attachMedia(video);
@@ -245,13 +285,13 @@
           hls.destroy();
         }
       });
-
+ 
       return () => {
         hls.destroy();
         revokePlaybackUrl();
       };
     }
-
+ 
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
       const handleMediaError = () => {
         status.textContent = `Media error: ${video.error?.message || 'unsupported video format'}`;
@@ -265,12 +305,12 @@
         revokePlaybackUrl();
       };
     }
-
+ 
     revokePlaybackUrl();
     status.textContent = 'HLS playback is not supported in this browser';
     return () => {};
   }
-
+ 
   async function createPlaybackUrl(playlistUrl) {
     if (!playlistUrl.startsWith('data:')) return playlistUrl;
     const playlistText = await readPlaylist(playlistUrl);
@@ -278,17 +318,17 @@
       type: 'application/vnd.apple.mpegurl',
     }));
   }
-
+ 
   async function downloadVideo(playlistUrl, button, status) {
     button.disabled = true;
     button.style.cursor = 'wait';
-
+ 
     try {
       status.textContent = 'Reading playlist...';
       const playlistText = await readPlaylist(playlistUrl);
       const playlist = parsePlaylist(playlistText, playlistUrl);
       if (!playlist.segments.length) throw new Error('The playlist has no media segments');
-
+ 
       let cryptoKey = null;
       if (playlist.keyUrl) {
         status.textContent = 'Loading encryption key...';
@@ -296,12 +336,12 @@
         if (keyBytes.byteLength !== 16) throw new Error(`Invalid AES key length: ${keyBytes.byteLength} bytes`);
         cryptoKey = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CBC' }, false, ['decrypt']);
       }
-
+ 
       const segments = new Array(playlist.segments.length);
       let nextIndex = 0;
       let completed = 0;
       const workerCount = Math.min(3, playlist.segments.length);
-
+ 
       async function worker() {
         while (nextIndex < playlist.segments.length) {
           const index = nextIndex++;
@@ -322,7 +362,7 @@
           status.textContent = `Downloading ${completed}/${playlist.segments.length}`;
         }
       }
-
+ 
       await Promise.all(Array.from({ length: workerCount }, () => worker()));
       status.textContent = 'Merging video...';
       const blob = new Blob(segments, { type: 'video/mp2t' });
@@ -336,7 +376,7 @@
       button.style.cursor = 'pointer';
     }
   }
-
+ 
   async function readPlaylist(url) {
     if (url.startsWith('data:')) {
       const comma = url.indexOf(',');
@@ -347,14 +387,14 @@
     }
     return requestWithFetch(url, 'text');
   }
-
+ 
   function parsePlaylist(text, playlistUrl) {
     const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     const segments = [];
     let keyUrl = null;
     let iv = null;
     let mediaSequence = 0;
-
+ 
     for (const line of lines) {
       if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
         mediaSequence = Number(line.split(':')[1]) || 0;
@@ -371,15 +411,15 @@
         segments.push(resolveUrl(playlistUrl, line));
       }
     }
-
+ 
     return { segments, keyUrl, iv, mediaSequence };
   }
-
+ 
   // ── @grant none: dùng native fetch thẳng, không cần GM API ───────────────
   async function fetchBuffer(url) {
     return requestWithFetch(url, 'arraybuffer').then((v) => normalizeArrayBuffer(v, url));
   }
-
+ 
   async function requestWithFetch(url, responseType) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30_000);
@@ -397,7 +437,7 @@
       clearTimeout(timeout);
     }
   }
-
+ 
   function normalizeArrayBuffer(value, url) {
     if (value instanceof ArrayBuffer) return value.slice(0);
     if (ArrayBuffer.isView(value)) {
@@ -405,7 +445,7 @@
     }
     throw new Error(`Invalid binary response from ${new URL(url).hostname}`);
   }
-
+ 
   async function fetchBufferWithRetry(url, maxAttempts) {
     let lastError;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -418,19 +458,19 @@
     }
     throw lastError;
   }
-
+ 
   function resolveUrl(base, value) {
     if (/^https?:\/\//i.test(value)) return value;
     if (base.startsWith('data:')) throw new Error(`Relative URL in data playlist: ${value}`);
     return new URL(value, base).href;
   }
-
+ 
   function sequenceIv(sequence) {
     const iv = new Uint8Array(16);
     new DataView(iv.buffer).setUint32(12, sequence);
     return iv;
   }
-
+ 
   function hexToBytes(hex) {
     const bytes = new Uint8Array(hex.length / 2);
     for (let index = 0; index < bytes.length; index++) {
@@ -438,7 +478,7 @@
     }
     return bytes;
   }
-
+ 
   function triggerDownload(blob, filename) {
     const blobUrl = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -449,12 +489,12 @@
     link.remove();
     setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
   }
-
+ 
   function makeFilename() {
     const title = document.querySelector('h1')?.textContent?.trim() || document.title || 'qmh-video';
     return `${title.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim()}.ts`;
   }
-
+ 
   function formatBytes(bytes) {
     const units = ['B', 'KB', 'MB', 'GB'];
     let value = bytes;
@@ -465,8 +505,9 @@
     }
     return `${value.toFixed(unitIndex ? 1 : 0)} ${units[unitIndex]}`;
   }
-
+ 
   function delay(milliseconds) {
     return new Promise((resolve) => setTimeout(resolve, milliseconds));
   }
 })();
+
