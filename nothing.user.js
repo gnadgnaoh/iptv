@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         QMH Monster HLS Player & Downloader
-// @namespace    https://github.com/siritami
-// @version      2.4.0
+// @version      2.7.2
 // @description  Replace the QMH player with a simple HLS player and download its resolved stream
-// @include      https://qmh.*/*
-// @exclude      https://qmh.garden/*
+// @match        https://qmh.red/*
+// @match        https://qmh.monster/*
+// @include      /^https:\/\/qmh\.(red|monster)\/.*$/
 // @grant        none
 // @allFrames    true
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.13/dist/hls.min.js
@@ -15,8 +15,14 @@
   'use strict';
 
   const MESSAGE_TYPE = 'QMH_RESOLVED_HLS';
+  const KEY_MESSAGE_TYPE = 'QMH_AES_KEY';
   const RESOLVE_PATH = '/api/v1/upload/video-hls/resolve';
+  const HLS_TOKEN_PATH = '/api/hls-token';
   const isTopFrame = window === window.top;
+
+  const SITE_ORIGIN = location.origin;
+  const SITE_HOST = location.hostname;
+  const API_ORIGIN = SITE_ORIGIN.replace(/^https?:\/\//, (m) => m + 'api.');
 
   let currentPlaylistUrl = null;
   let playerCleanup = null;
@@ -25,11 +31,93 @@
   let playerObserver = null;
   let playerPortal = null;
   let portalPositionCleanup = null;
+  let cachedKey = null;
+  let resolveBody = null;
 
   installFetchInterceptor();
+  installKeyCapture();
   if (isTopFrame) {
     window.addEventListener('message', handleResolvedPlaylist);
+    window.addEventListener('message', handleKeyMessage);
     watchNavigation();
+    watchForVipLock();
+  }
+
+  function loadHlsLibrary() {
+    if (typeof Hls !== 'undefined') return Promise.resolve();
+    return new Promise((resolve) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/hls.js@1.6.13/dist/hls.min.js';
+      s.async = true;
+      s.onload = () => resolve();
+      s.onerror = () => resolve();
+      (document.head || document.documentElement).appendChild(s);
+    });
+  }
+
+  function waitForHls(timeoutMs = 10000) {
+    if (typeof Hls !== 'undefined') return Promise.resolve();
+    return new Promise((resolve) => {
+      const started = Date.now();
+      const check = () => {
+        if (typeof Hls !== 'undefined') return resolve();
+        if (Date.now() - started > timeoutMs) return resolve();
+        setTimeout(check, 100);
+      };
+      check();
+    });
+  }
+
+  function watchForVipLock() {
+    let lastReload = 0;
+    const tryUnlock = () => {
+      if (currentPlaylistUrl) return;
+      const region = document.querySelector('section[aria-label="Video player"]');
+      if (!region) return;
+      const text = region.innerText || '';
+      if (!text.includes('VIP PREVIEW ENDED') &&
+          !(text.includes('VIP') && text.includes('Nâng cấp VIP'))) return;
+
+      let cleared = 0;
+      const isLockKey = (name) =>
+        name.startsWith('vip_locked_movie_') || name.startsWith('vip_watch_sec_movie_');
+
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const name = localStorage.key(i);
+        if (name && isLockKey(name)) {
+          localStorage.removeItem(name);
+          cleared++;
+        }
+      }
+      for (let i = sessionStorage.length - 1; i >= 0; i--) {
+        const name = sessionStorage.key(i);
+        if (name && isLockKey(name)) {
+          sessionStorage.removeItem(name);
+          cleared++;
+        }
+      }
+      document.cookie.split(';').forEach((c) => {
+        const name = c.split('=')[0].trim();
+        if (isLockKey(name)) {
+          document.cookie = name + '=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=.' + SITE_HOST;
+          document.cookie = name + '=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
+          cleared++;
+        }
+      });
+
+      if (cleared > 0) {
+        console.warn(`[QMH HLS] VIP lock detected, cleared ${cleared} lock key(s). Reloading to re-render player...`);
+        const now = Date.now();
+        if (now - lastReload > 15000) {
+          lastReload = now;
+          location.reload();
+        } else {
+          console.warn('[QMH HLS] Skipping reload — last reload was <15s ago');
+        }
+      }
+    };
+    window.addEventListener('load', tryUnlock);
+    setInterval(tryUnlock, 5000);
   }
 
   function installFetchInterceptor() {
@@ -38,8 +126,20 @@
 
     const originalFetch = window.fetch.bind(window);
     window.fetch = async function (...args) {
-      const response = await originalFetch(...args);
       const requestUrl = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+      const requestInit = typeof args[1] === 'object' ? args[1] : {};
+
+      if (requestUrl.includes(RESOLVE_PATH) && typeof requestInit.body === 'string') {
+        try {
+          const parsed = JSON.parse(requestInit.body);
+          if (parsed?.token && parsed?.hash) {
+            resolveBody = parsed;
+            console.info('[QMH HLS] resolve payload captured (token/hash)');
+          }
+        } catch (e) { }
+      }
+
+      const response = await originalFetch(...args);
 
       if (requestUrl.includes(RESOLVE_PATH) && response.ok) {
         response.clone().json().then((payload) => {
@@ -54,6 +154,47 @@
     };
   }
 
+  function installKeyCapture() {
+    if (window.__qmhKeyCaptureInstalled) return;
+    window.__qmhKeyCaptureInstalled = true;
+
+    function captureKey(buffer) {
+      if (!buffer || buffer.byteLength !== 16) return;
+      cachedKey = new Uint8Array(buffer);
+      console.info('[QMH HLS] AES-128 key captured (' + cachedKey.length + ' bytes)');
+      if (!isTopFrame) {
+        window.top.postMessage({ type: KEY_MESSAGE_TYPE, keyBytes: Array.from(cachedKey) }, '*');
+      }
+    }
+
+    const originalOpen = XMLHttpRequest.prototype.open;
+    const originalSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+      this.__qmhKeyUrl = typeof url === 'string' ? url : '';
+      return originalOpen.call(this, method, url, ...rest);
+    };
+    XMLHttpRequest.prototype.send = function (...args) {
+      const xhr = this;
+      if (xhr.__qmhKeyUrl?.includes('/video-hls-key/')) {
+        xhr.addEventListener('load', () => {
+          if (xhr.status === 200 && xhr.response && xhr.response.byteLength === 16) {
+            captureKey(xhr.response);
+          }
+        });
+      }
+      return originalSend.apply(this, args);
+    };
+  }
+
+  function handleKeyMessage(event) {
+    if (!isTopFrame) return;
+    if (event.data?.type !== KEY_MESSAGE_TYPE || !Array.isArray(event.data.keyBytes)) return;
+    if (event.data.keyBytes.length === 16) {
+      cachedKey = new Uint8Array(event.data.keyBytes);
+      console.info('[QMH HLS] AES-128 key received from player frame (' + cachedKey.length + ' bytes)');
+    }
+  }
+
   function handleResolvedPlaylist(event) {
     if (!isTopFrame) return;
     if (event.data?.type !== MESSAGE_TYPE || typeof event.data.playlistUrl !== 'string') return;
@@ -61,7 +202,6 @@
     scheduleMount(750);
   }
 
-  // ── Reset toàn bộ khi SPA navigate sang trang khác ───────────────────────
   function watchNavigation() {
     let lastUrl = location.href;
 
@@ -83,7 +223,6 @@
       mountGeneration++;
     }
 
-    // Patch history API
     const originalPushState = history.pushState.bind(history);
     const originalReplaceState = history.replaceState.bind(history);
     history.pushState = function (...args) {
@@ -96,7 +235,6 @@
     };
     window.addEventListener("popstate", onUrlChange);
 
-    // Fallback: poll URL mỗi 300ms phòng SPA dùng cơ chế khác
     setInterval(onUrlChange, 300);
   }
 
@@ -270,6 +408,9 @@
   }
 
   async function startHls(video, playlistUrl, status) {
+    loadHlsLibrary();
+    await waitForHls(10000);
+
     const playbackUrl = await createPlaybackUrl(playlistUrl);
     const revokePlaybackUrl = playbackUrl.startsWith('blob:')
       ? () => URL.revokeObjectURL(playbackUrl)
@@ -334,16 +475,35 @@
 
     try {
       status.textContent = 'Reading playlist...';
-      const playlistText = await readPlaylist(playlistUrl);
+      let playlistText = await readPlaylist(playlistUrl);
+
+      if (!(cachedKey && cachedKey.byteLength === 16)) {
+        const fresh = await resolveFreshPlaylist();
+        if (fresh) {
+          playlistUrl = fresh.playlistUrl;
+          playlistText = fresh.playlistText;
+          status.textContent = 'Reading fresh playlist...';
+        }
+      }
+
       const playlist = parsePlaylist(playlistText, playlistUrl);
       if (!playlist.segments.length) throw new Error('The playlist has no media segments');
 
       let cryptoKey = null;
       if (playlist.keyUrl) {
-        status.textContent = 'Loading encryption key...';
-        const keyBytes = new Uint8Array(await fetchBuffer(playlist.keyUrl));
-        if (keyBytes.byteLength !== 16) throw new Error(`Invalid AES key length: ${keyBytes.byteLength} bytes`);
-        cryptoKey = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CBC' }, false, ['decrypt']);
+        if (!(cachedKey && cachedKey.byteLength === 16)) {
+          status.textContent = 'Waiting for AES key...';
+          await waitForKey(3000);
+        }
+        if (cachedKey && cachedKey.byteLength === 16) {
+          status.textContent = 'Using captured AES key...';
+        } else {
+          status.textContent = 'Loading encryption key...';
+          const keyBytes = new Uint8Array(await fetchBuffer(playlist.keyUrl));
+          if (keyBytes.byteLength !== 16) throw new Error(`Invalid AES key length: ${keyBytes.byteLength} bytes`);
+          cachedKey = keyBytes;
+        }
+        cryptoKey = await crypto.subtle.importKey('raw', cachedKey, { name: 'AES-CBC' }, false, ['decrypt']);
       }
 
       const segments = new Array(playlist.segments.length);
@@ -383,6 +543,57 @@
     } finally {
       button.disabled = false;
       button.style.cursor = 'pointer';
+    }
+  }
+
+  async function resolveFreshPlaylist() {
+    try {
+      const tokenResp = await fetch(HLS_TOKEN_PATH, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (!tokenResp.ok) throw new Error(`hls-token failed: ${tokenResp.status}`);
+      const tokenPayload = await tokenResp.json();
+      if (!tokenPayload?.token) throw new Error('hls-token returned no token');
+
+      if (resolveBody) {
+        const apiBase = resolveBody.apiBase || API_ORIGIN + '/api/v1';
+        const resolveResp = await fetch(`${apiBase}${RESOLVE_PATH}`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'content-type': 'application/json',
+            'origin': SITE_ORIGIN,
+            'referer': SITE_ORIGIN + '/',
+          },
+          body: JSON.stringify({
+            token: tokenPayload.token,
+            hash: tokenPayload.hash || resolveBody.hash,
+            apiBase,
+            embedRequired: resolveBody.embedRequired ?? true,
+          }),
+        });
+        if (!resolveResp.ok) throw new Error(`resolve failed: ${resolveResp.status}`);
+        const payload = await resolveResp.json();
+        const newPlaylistUrl = payload?.data?.url;
+        if (payload?.success && typeof newPlaylistUrl === 'string') {
+          const newPlaylistText = await readPlaylist(newPlaylistUrl);
+          return { playlistUrl: newPlaylistUrl, playlistText: newPlaylistText };
+        }
+      }
+
+      const decodedToken = JSON.parse(atob(tokenPayload.token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')) || '{}');
+      const m3u8Url = decodedToken?.u;
+      if (typeof m3u8Url === 'string' && /\.m3u8/.test(m3u8Url)) {
+        const newPlaylistText = await requestWithFetch(m3u8Url, 'text');
+        return { playlistUrl: m3u8Url, playlistText: newPlaylistText };
+      }
+      return null;
+    } catch (error) {
+      console.warn('[QMH HLS] Fresh resolve failed:', error);
+      return null;
     }
   }
 
@@ -433,7 +644,7 @@
     const timeout = setTimeout(() => controller.abort(), 30_000);
     try {
       const response = await fetch(url, {
-        credentials: 'omit',
+        credentials: new URL(url).hostname === location.hostname ? 'include' : 'omit',
         signal: controller.signal,
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}: ${url}`);
@@ -516,5 +727,18 @@
 
   function delay(milliseconds) {
     return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  }
+
+  function waitForKey(timeoutMs = 5000) {
+    if (cachedKey && cachedKey.byteLength === 16) return Promise.resolve();
+    return new Promise((resolve) => {
+      const started = Date.now();
+      const check = () => {
+        if (cachedKey && cachedKey.byteLength === 16) return resolve();
+        if (Date.now() - started > timeoutMs) return resolve();
+        setTimeout(check, 100);
+      };
+      check();
+    });
   }
 })();
