@@ -1,5 +1,6 @@
 // ==UserScript==
 // @name         QMH Monster HLS Player & Downloader
+// @namespace    https://github.com/gnadgnaoh
 // @version      2.7.2
 // @description  Replace the QMH player with a simple HLS player and download its resolved stream
 // @match        https://qmh.red/*
