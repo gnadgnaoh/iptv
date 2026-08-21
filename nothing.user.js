@@ -3,9 +3,8 @@
 // @namespace    https://github.com/gnadgnaoh
 // @version      2.7.2
 // @description  Replace the QMH player with a simple HLS player and download its resolved stream
-// @match        https://qmh.red/*
-// @match        https://qmh.monster/*
-// @include      /^https:\/\/qmh\.(red|monster)\/.*$/
+// @match        https://qmh.pink/*
+// @include      /^https:\/\/qmh\.(pink)\/.*$/
 // @grant        none
 // @allFrames    true
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.13/dist/hls.min.js
