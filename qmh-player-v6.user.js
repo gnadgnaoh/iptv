@@ -1,27 +1,27 @@
 // ==UserScript==
 // @name         QMH HLS Player (lite)
 // @namespace    https://github.com/gnadgnaoh
-// @version      6.0.0
+// @version      6.1.0
 // @description  Thay player QMH bằng HLS player nhẹ. Chỉ để xem — không tải về.
 // @match        https://qmh.kim/*
 // @grant        none
+// @allFrames    true
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.13/dist/hls.light.min.js
 // @run-at       document-start
 // ==/UserScript==
 
 /*
- * ĐỔI SO VỚI v5:
- *  1. hls.light.min.js thay cho hls.min.js — bỏ phụ đề, alternate-audio, CMCD,
- *     EME (DRM). Phim QMH không dùng cái nào.
- *     → Nếu phát lỗi: đổi "hls.light.min.js" thành "hls.min.js".
+ * v6.1 — QUAY VỀ CƠ CHẾ ĐÃ CHẠY ĐƯỢC
  *
- *  2. Bỏ @allFrames. Script tự gọi /api/hls-token ở frame trên cùng để lấy URL
- *     m3u8, nên không cần nhét hls.js vào iframe nữa.
- *     → NẾU KHÔNG PHÁT ĐƯỢC: thêm lại dòng sau vào phần metadata ở trên
- *              // @allFrames    true
- *       Hook fetch bên dưới sẽ tự hoạt động trở lại, không phải sửa gì thêm.
+ *  @allFrames đã được bật lại. Script lấy URL m3u8 bằng cách hook fetch bên
+ *  trong iframe player (giống v5) — đường này đã kiểm chứng là chạy.
  *
- *  Bật DEBUG bên dưới rồi mở console để biết đường nào đang chạy.
+ *  Đường /api/hls-token vẫn còn trong code nhưng MẶC ĐỊNH TẮT (CFG.TOKEN_PATH).
+ *  Bật lên chỉ để thử nghiệm: nếu nó chạy thì bỏ được @allFrames, hls.js không
+ *  phải nhét vào iframe nữa. Bật kèm DEBUG rồi xem console.
+ *
+ *  Nếu video ra khung đen / không phát: đổi "hls.light.min.js" ở trên thành
+ *  "hls.min.js".
  */
 
 (() => {
@@ -60,10 +60,11 @@
     VIP_EVERY: 5,
     VIP_MAX: 3,
     KILL_FRAME: true, // gỡ iframe gốc để nó thôi buffer song song
-    TOKEN_TRIES: 4,   // số lần thử /api/hls-token cho mỗi trang
+    TOKEN_PATH: false, // true = thử lấy playlist thẳng từ /api/hls-token
+    TOKEN_TRIES: 4,    // số lần thử cho mỗi trang
   };
 
-  /* ---- hook fetch: chỉ có tác dụng khi bạn bật lại @allFrames --------- */
+  /* ---- hook fetch trong iframe: đây là đường lấy playlist chính --------- */
   const origFetch = window.fetch.bind(window);
   window.fetch = function (...a) {
     const u = typeof a[0] === 'string' ? a[0] : a[0]?.url || '';
@@ -143,7 +144,7 @@
       if (url) timer = setTimeout(mount, 150);
     }
 
-    if (!url && !trying && ($(SEL_FRAME) || $(SEL_REGION))) grabToken();
+    if (CFG.TOKEN_PATH && !url && !trying && ($(SEL_FRAME) || $(SEL_REGION))) grabToken();
 
     if (++ticks % CFG.VIP_EVERY === 0) vip();
   }, CFG.TICK);
@@ -206,8 +207,7 @@
       if (e?.name === 'AbortError') return;
       log(`token ${tries}/${CFG.TOKEN_TRIES} hỏng:`, e.message);
       if (tries >= CFG.TOKEN_TRIES) {
-        console.warn('[QMH] Không lấy được playlist từ /api/hls-token. ' +
-          'Thêm "// @allFrames true" vào metadata của script rồi tải lại trang.');
+        console.warn('[QMH] /api/hls-token không dùng được — vẫn chạy bằng hook iframe.');
       }
     } finally {
       trying = false;
