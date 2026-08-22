@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QMH HLS Player (lite)
 // @namespace    https://github.com/gnadgnaoh
-// @version      6.1.0
+// @version      6.2.0
 // @description  Thay player QMH bằng HLS player nhẹ. Chỉ để xem — không tải về.
 // @match        https://qmh.kim/*
 // @grant        none
@@ -11,6 +11,13 @@
 // ==/UserScript==
 
 /*
+ * v6.2 — SỬA LỖI "This page couldn't load"
+ *
+ *  v6.1 gọi iframe.remove() để chặn player gốc buffer song song. Nhưng iframe đó
+ *  là node của React; gỡ nó khiến React ném NotFoundError khi reconcile và bung
+ *  error boundary của site. v6.2 chỉ đặt src=about:blank — iframe ngừng tải và
+ *  ngừng decode, node vẫn ở nguyên chỗ nên React không biết gì. Xem CFG.KILL_FRAME.
+ *
  * v6.1 — QUAY VỀ CƠ CHẾ ĐÃ CHẠY ĐƯỢC
  *
  *  @allFrames đã được bật lại. Script lấy URL m3u8 bằng cách hook fetch bên
@@ -59,7 +66,11 @@
     TICK: 1000,
     VIP_EVERY: 5,
     VIP_MAX: 3,
-    KILL_FRAME: true, // gỡ iframe gốc để nó thôi buffer song song
+    // Vô hiệu iframe gốc để nó thôi buffer song song.
+    //  'blank'  = đặt src=about:blank, GIỮ node trong DOM  ← an toàn với React
+    //  'remove' = gỡ hẳn node (có thể làm React crash -> "This page couldn't load")
+    //  false    = không đụng tới
+    KILL_FRAME: 'blank',
     TOKEN_PATH: false, // true = thử lấy playlist thẳng từ /api/hls-token
     TOKEN_TRIES: 4,    // số lần thử cho mỗi trang
   };
@@ -305,14 +316,24 @@
       log('player đã gắn');
 
       if (CFG.KILL_FRAME) {
-        // iframe gốc vẫn tải + decode song song = gấp đôi RAM video cho không
+        // iframe gốc vẫn tải + decode song song = gấp đôi RAM video cho không.
+        // NHƯNG: node này do React của site quản lý. Gỡ nó bằng remove() khiến
+        // React ném NotFoundError lúc reconcile -> error boundary -> trang trắng
+        // "This page couldn't load". Nên mặc định chỉ blank src, giữ node lại.
         setTimeout(() => {
           if (signal.aborted) return;
           const f = $(SEL_FRAME);
           if (!f) return;
-          try { f.src = 'about:blank'; } catch {}
-          f.remove();
-          log('đã gỡ iframe gốc');
+          try {
+            if (CFG.KILL_FRAME === 'remove') {
+              f.remove();
+            } else {
+              f.src = 'about:blank';        // ngừng tải + ngừng decode ngay
+              f.setAttribute('aria-hidden', 'true');
+              f.style.visibility = 'hidden';
+            }
+            log('đã vô hiệu iframe gốc:', CFG.KILL_FRAME);
+          } catch (e) { log('không vô hiệu được iframe:', e.message); }
         }, 1200);
       }
     } finally {
