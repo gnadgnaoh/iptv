@@ -3,31 +3,12 @@
 // @namespace    https://github.com/gnadgnaoh
 // @version      7.1.0
 // @description  Thay player QMH bằng HLS player nhẹ, phát bản playlist đầy đủ. Chỉ để xem.
-// @match        https://qmh.kim/*
+// @match        https://qmhv3.club/*
 // @grant        none
 // @allFrames    true
 // @require      https://cdn.jsdelivr.net/npm/hls.js@1.6.13/dist/hls.light.min.js
 // @run-at       document-start
 // ==/UserScript==
-
-/*
- * v7.0 — GHÉP CƠ CHẾ FULL PLAYLIST TỪ UPSTREAM
- *
- *  Site trả về playlist preview bị cắt cụt (không có #EXT-X-ENDLIST). Bản đầy đủ
- *  nằm ở đường dẫn đoán được: <api>/hls/movies/<movieId>/index.m3u8, và chỉ có
- *  dòng #EXT-X-KEY là được ký. Nên: tải bản đầy đủ, ghép dòng key của preview vào,
- *  phát bản ghép. Hết cảnh reload mỗi lần hết preview.
- *
- *  Khác upstream ở ba chỗ, đều để bớt việc:
- *   - Upstream base64 hoá playlist đã ghép thành data: URL rồi mới postMessage,
- *     phía nhận lại giải mã ngược. v7 làm việc ghép ở frame trên cùng và đưa
- *     thẳng text vào Blob URL — bỏ hẳn vòng base64 (phình 33%) và 2 lần copy.
- *   - Có cache theo movieId, mount lại không phải tải lại index.m3u8.
- *   - Chỉ quét lại URL tương đối khi playlist thật sự có URL tương đối.
- *
- *  Tắt bằng CFG.FULL_PLAYLIST = false → quay về phát đúng preview như v6.2.
- *  Nếu video đen / không phát: đổi "hls.light.min.js" thành "hls.min.js".
- */
 
 (() => {
   'use strict';
